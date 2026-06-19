@@ -1,0 +1,4 @@
+# Local artifacts
+*.test
+*.out
+.DS_Store

@@ -1,0 +1,44 @@
+# helios-permissions-go — Bitbucket Pipelines.
+#
+# Mirrors the Go SDK's CI to the permission-contract's contract
+# vector tests + the per-language unit + integration tests.
+#
+# The contract is fetched from the public GitHub mirror of
+# wazobiatech/permission-contract at a pinned version. Slim Go
+# images have curl — no need for git.
+#
+# Tag v* → go.mod's module path auto-ingests via the Go module
+# proxy. No publish step.
+
+image: golang:1.24
+
+pipelines:
+  default:
+    - step:
+        name: vet
+        script:
+          - go vet ./...
+    - step:
+        name: test
+        script:
+          - go test -race -count=1 ./...
+    - step:
+        name: codegen
+        script:
+          # Run the in-repo Go codegen binary against the
+          # public GitHub mirror of permission-contract v1.0.0.
+          # Diff against the committed file. Drift fails the build.
+          - curl -fsSL https://raw.githubusercontent.com/wazobiatech/permission-contract/v1.0.0/permissions.json -o /tmp/permissions.json
+          - go run ./cmd/codegen /tmp/permissions.json > /tmp/role_permissions.go
+          - git diff --exit-code helios_permissions/role_permissions.go -- /tmp/role_permissions.go
+  branches: {}
+  tags:
+    v*:
+      - step:
+          name: publish
+          script:
+            # Tag-driven publish: the Go module proxy auto-ingests
+            # tagged commits. No registry auth required.
+            - go vet ./...
+            - go test -race -count=1 ./...
+            - echo "tag $BITBUCKET_TAG pushed; module proxy will ingest automatically"
