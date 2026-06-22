@@ -26,9 +26,9 @@ pipelines:
         name: codegen
         script:
           # Run the in-repo Go codegen binary against the
-          # public GitHub mirror of permission-contract v1.0.0.
+          # public GitHub mirror of permission-contract v1.3.0.
           # Diff against the committed file. Drift fails the build.
-          - curl -fsSL https://raw.githubusercontent.com/wazobiatech/permission-contract/v1.0.0/permissions.json -o /tmp/permissions.json
+          - curl -fsSL https://raw.githubusercontent.com/wazobiatech/permission-contract/v1.3.0/permissions.json -o /tmp/permissions.json
           - go run ./cmd/codegen /tmp/permissions.json > /tmp/role_permissions.go
           - git diff --exit-code helios_permissions/role_permissions.go -- /tmp/role_permissions.go
   branches: {}

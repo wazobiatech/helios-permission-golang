@@ -23,12 +23,9 @@ func TestRoles(t *testing.T) {
 	}
 }
 
-// TestRoleHasPermissionOwnerUniversal walks OWNER's perm set and
-// asserts the universal perm is present plus the OWNER-only ones.
-func TestRoleHasPermissionOwnerUniversal(t *testing.T) {
-	if !hp.RoleHasPermission(hp.RoleOwner, hp.PermissionHeliosTenantSwitch) {
-		t.Fatal("OWNER must have helios:tenant:switch (universal perm)")
-	}
+// TestRoleHasPermissionOwnerHasOwnerOnly walks OWNER's perm set and
+// asserts the OWNER-only perms are present.
+func TestRoleHasPermissionOwnerHasOwnerOnly(t *testing.T) {
 	if !hp.RoleHasPermission(hp.RoleOwner, hp.PermissionHeliosTenantTransfer) {
 		t.Fatal("OWNER must have helios:tenant:transfer (OWNER-only)")
 	}
@@ -51,12 +48,33 @@ func TestRoleHasPermissionTransferIsOwnerOnly(t *testing.T) {
 	}
 }
 
-// TestRoleHasPermissionUniversalAcrossAllRoles — every role has
-// helios:tenant:switch.
-func TestRoleHasPermissionUniversalAcrossAllRoles(t *testing.T) {
+// TestSelfScopeSwitchIsUniversal — the universal perm
+// helios:tenant:switch:self is in SELF_PERMISSIONS and NOT in any role.
+// (v1.3.0 split it out of role_permissions into the self scope.)
+func TestSelfScopeSwitchIsUniversal(t *testing.T) {
+	if !hp.IsSelfScope(hp.PermissionHeliosTenantSwitchSelf) {
+		t.Fatal("helios:tenant:switch:self must have scope self")
+	}
 	for _, r := range hp.Roles {
-		if !hp.RoleHasPermission(r, hp.PermissionHeliosTenantSwitch) {
-			t.Fatalf("role %s missing universal perm helios:tenant:switch", r)
+		if hp.RoleHasPermission(r, hp.PermissionHeliosTenantSwitchSelf) {
+			t.Fatalf("role %s must NOT have helios:tenant:switch:self (it's self-scope, granted implicitly)", r)
+		}
+	}
+}
+
+// TestSelfScopeMercuryReadWriteSelf — the two self-scope perms in the
+// contract (mercury:user:read:self, mercury:user:write:self) are
+// universal and must NOT appear in any role.
+func TestSelfScopeMercuryReadWriteSelf(t *testing.T) {
+	if !hp.IsSelfScope(hp.PermissionMercuryUserReadSelf) {
+		t.Fatal("mercury:user:read:self must have scope self")
+	}
+	if !hp.IsSelfScope(hp.PermissionMercuryUserWriteSelf) {
+		t.Fatal("mercury:user:write:self must have scope self")
+	}
+	for _, r := range hp.Roles {
+		if hp.RoleHasPermission(r, hp.PermissionMercuryUserReadSelf) {
+			t.Fatalf("role %s must NOT have self-scope perm mercury:user:read:self", r)
 		}
 	}
 }
@@ -108,5 +126,148 @@ func TestViewerReadOnly(t *testing.T) {
 	}
 	if hp.RoleHasPermission(hp.RoleViewer, hp.PermissionMusePostsWrite) {
 		t.Fatal("VIEWER must not have muse:posts:write")
+	}
+}
+
+// ----------------------------------------------------------------------------
+// v1.3.0 scope helpers
+// ----------------------------------------------------------------------------
+
+// TestPermScopeContents — every entry in PERM_SCOPE has a valid scope and
+// the perms union-matches the const block (no perm is missing or extra).
+func TestPermScopeContents(t *testing.T) {
+	if len(hp.PERM_SCOPE) == 0 {
+		t.Fatal("PERM_SCOPE must be populated")
+	}
+	for perm, scope := range hp.PERM_SCOPE {
+		switch scope {
+		case hp.ScopeSelf, hp.ScopePlatform, hp.ScopeProject, hp.ScopePlatformProject:
+			// ok
+		default:
+			t.Errorf("perm %q has unknown scope %q", perm, scope)
+		}
+	}
+}
+
+// TestScopePartitionedTuplesAreUnion — the four scope tuples partition
+// PERM_SCOPE exactly (every perm appears in exactly one tuple).
+func TestScopePartitionedTuplesAreUnion(t *testing.T) {
+	count := len(hp.SELF_PERMISSIONS) + len(hp.PLATFORM_PERMISSIONS) +
+		len(hp.PROJECT_PERMISSIONS) + len(hp.DUAL_PERMISSIONS)
+	if count != len(hp.PERM_SCOPE) {
+		t.Errorf("scope tuples sum to %d but PERM_SCOPE has %d entries", count, len(hp.PERM_SCOPE))
+	}
+	seen := map[hp.Permission]int{}
+	for _, p := range hp.SELF_PERMISSIONS {
+		seen[p]++
+	}
+	for _, p := range hp.PLATFORM_PERMISSIONS {
+		seen[p]++
+	}
+	for _, p := range hp.PROJECT_PERMISSIONS {
+		seen[p]++
+	}
+	for _, p := range hp.DUAL_PERMISSIONS {
+		seen[p]++
+	}
+	for perm, n := range seen {
+		if n != 1 {
+			t.Errorf("perm %q appears in %d tuples (must be exactly 1)", perm, n)
+		}
+	}
+}
+
+// TestIsSelfScope — true for self-scope perms, false otherwise.
+func TestIsSelfScope(t *testing.T) {
+	for _, p := range hp.SELF_PERMISSIONS {
+		if !hp.IsSelfScope(p) {
+			t.Errorf("IsSelfScope(%q) = false, want true", p)
+		}
+	}
+	for _, p := range hp.PLATFORM_PERMISSIONS {
+		if hp.IsSelfScope(p) {
+			t.Errorf("IsSelfScope(%q platform) = true, want false", p)
+		}
+	}
+	for _, p := range hp.PROJECT_PERMISSIONS {
+		if hp.IsSelfScope(p) {
+			t.Errorf("IsSelfScope(%q project) = true, want false", p)
+		}
+	}
+	for _, p := range hp.DUAL_PERMISSIONS {
+		if hp.IsSelfScope(p) {
+			t.Errorf("IsSelfScope(%q dual) = true, want false", p)
+		}
+	}
+}
+
+// TestIsPlatformGrantable — true for platform and dual, false for self/project.
+func TestIsPlatformGrantable(t *testing.T) {
+	for _, p := range hp.PLATFORM_PERMISSIONS {
+		if !hp.IsPlatformGrantable(p) {
+			t.Errorf("IsPlatformGrantable(%q) = false, want true", p)
+		}
+	}
+	for _, p := range hp.DUAL_PERMISSIONS {
+		if !hp.IsPlatformGrantable(p) {
+			t.Errorf("IsPlatformGrantable(%q dual) = false, want true", p)
+		}
+	}
+	for _, p := range hp.SELF_PERMISSIONS {
+		if hp.IsPlatformGrantable(p) {
+			t.Errorf("IsPlatformGrantable(%q self) = true, want false", p)
+		}
+	}
+	for _, p := range hp.PROJECT_PERMISSIONS {
+		if hp.IsPlatformGrantable(p) {
+			t.Errorf("IsPlatformGrantable(%q project) = true, want false", p)
+		}
+	}
+}
+
+// TestIsTenantGrantable — true for project and dual, false for self/platform.
+// Tenant-defined perms (NOT in PERM_SCOPE) are also grantable via TenantRole.
+func TestIsTenantGrantable(t *testing.T) {
+	for _, p := range hp.PROJECT_PERMISSIONS {
+		if !hp.IsTenantGrantable(string(p)) {
+			t.Errorf("IsTenantGrantable(%q) = false, want true", p)
+		}
+	}
+	for _, p := range hp.DUAL_PERMISSIONS {
+		if !hp.IsTenantGrantable(string(p)) {
+			t.Errorf("IsTenantGrantable(%q dual) = false, want true", p)
+		}
+	}
+	for _, p := range hp.SELF_PERMISSIONS {
+		if hp.IsTenantGrantable(string(p)) {
+			t.Errorf("IsTenantGrantable(%q self) = true, want false", p)
+		}
+	}
+	for _, p := range hp.PLATFORM_PERMISSIONS {
+		if hp.IsTenantGrantable(string(p)) {
+			t.Errorf("IsTenantGrantable(%q platform) = true, want false", p)
+		}
+	}
+	// Tenant-defined perm (not in the contract vocabulary) is grantable.
+	if !hp.IsTenantGrantable("muse:custom:tenant-only-action") {
+		t.Fatal("IsTenantGrantable(tenant-defined perm) = false, want true")
+	}
+}
+
+// TestNoSelfOrProjectPermsInRoles — invariant from validate.mjs: self and
+// project perms must NOT appear in any role's ROLE_PERMISSIONS entry.
+func TestNoSelfOrProjectPermsInRoles(t *testing.T) {
+	for _, r := range hp.Roles {
+		perms := hp.ResolvePermissions(r)
+		for _, p := range perms {
+			scope, ok := hp.PERM_SCOPE[p]
+			if !ok {
+				t.Errorf("role %s perm %q has no entry in PERM_SCOPE", r, p)
+				continue
+			}
+			if scope == hp.ScopeSelf || scope == hp.ScopeProject {
+				t.Errorf("role %s has %q (scope %q) — forbidden by contract", r, p, scope)
+			}
+		}
 	}
 }
