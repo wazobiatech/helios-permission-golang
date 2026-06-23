@@ -78,7 +78,7 @@ func main() {
 | `SIGNATURE_SHARED_SECRET` | HMAC shared secret for Helios auth | yes |
 | `PERMISSION_REDIS_URL` | Redis URL for the shared permission cache | yes |
 | `HELIOS_SOURCE_SERVICE` | `x-source-service` header (default `helios-permissions-go`) | no |
-| `CACHE_TTL_SECONDS` | Cache TTL (default `60`) | no |
+| `CACHE_TTL_SECONDS` | Cache TTL — defaults to `0` (no expiry; entries live until explicit DEL). Pass a positive int to opt back into a TTL. | no |
 | `HELIOS_FETCH_TIMEOUT_MS` | Per-fetch timeout to Helios (default `2000`) | no |
 | `STALE_ON_ERROR` | `1`/`true` = allow stale on Helios error; default `1` | no |
 
@@ -138,6 +138,27 @@ helios:perms:{userId}:{tenantId}    →    JSON array of permission strings
 The key shape is the cross-language contract — must match Helios's
 `permission-cache.service.ts` and the TS / Python / Laravel SDKs.
 Drift here would silently break every consumer.
+
+## Cache TTL policy (v0.2.0 — no expiry by default)
+
+The default cache has **no TTL**. Entries live until explicit DEL
+via `Invalidate` / `InvalidateTenant` (or via Helios's sync
+`WriteThrough` on every role-changing mutation). The cache is the
+primary read path for `callerHasPermission` and we target a 90-98%
+hit rate; entries must outlive the request burst. Every entry is
+invalidated explicitly at the mutation site — Helios calls
+`WriteThrough` / `Invalidate` after every role change, Hecate's
+event consumer drops the key on `helios.*` events, and the internal
+events handlers (`athens.project.*`, `athens.service.update`,
+`mercury.user.deleted`, `helios.invitation.accepted`) invalidate the
+tenant-level cache after each event. A 60s safety-net TTL would just
+be wasted work — entries the next read would re-populate anyway.
+
+Pass `CacheTTLSeconds: <positive int>` to `Create` to opt back into
+a TTL. **Both Helios-side and SDK-side caches must use the same TTL
+policy** — if Helios writes with one TTL and the SDK reads with
+another, the SDK's TTL wins on the next SDK-side `Set` call and may
+drop entries before Helios has a chance to re-write them.
 
 ## Architecture
 

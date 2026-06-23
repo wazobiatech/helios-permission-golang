@@ -18,6 +18,32 @@
 // SCAN is non-blocking; KEYS would block the Redis event loop on a
 // large keyspace.
 //
+// TTL policy (no expiry by default):
+//
+//   The cache is the primary read path for CallerHasPermission. We
+//   target a 90-98% hit rate, which means entries must outlive the
+//   request burst. Every entry is invalidated explicitly at the
+//   mutation site — Helios calls WriteThrough / Invalidate after
+//   each role change, Hecate's event consumer drops the key on
+//   helios.* events, and the internal events handlers drop the
+//   tenant-level cache after each event. A TTL safety-net would
+//   only force needless re-population; remove it by default.
+//
+//   go-redis treats time.Duration(0) as "no expiry" — SET / SETNX
+//   with a 0 expiration writes a persistent key that survives until
+//   explicit DEL. So `DefaultCacheTTLSeconds = 0` and the same
+//   Set/WriteThrough code path with secondsToDuration(0) produce
+//   PERSIST semantics.
+//
+//   Pass TTLSeconds=<positive int> to opt back into a TTL. Useful
+//   for staging environments with churn that would otherwise grow
+//   the keyspace unbounded.
+//
+//   IMPORTANT: must match the Helios-side cache. If Helios writes
+//   with one TTL and the SDK reads with another, the SDK's TTL
+//   wins on the next SDK-side Set call and may drop entries before
+//   Helios has a chance to re-write them.
+//
 // Error handling — best-effort, fail open:
 //
 //   - Get failures:  log warn + return nil (caller falls through to Helios).
@@ -25,10 +51,11 @@
 //                    in-flight repopulate path, swallowing is fine.
 //   - WriteThrough:  log warn + return error. Helios's own writeThrough
 //                    logs + swallows because the Prisma mutation has
-//                    already committed; the cache will heal via TTL.
-//   - Invalidate:    log error + return error. Stale data has no
-//                    automatic recovery except TTL expiry. Operators
-//                    need visibility.
+//                    already committed; the cache will heal via the
+//                    next explicit invalidate.
+//   - Invalidate:    log error + return error. Stale data with no TTL
+//                    safety net is sticky until the next WriteThrough
+//                    for this user; that is the operator-visible signal.
 
 package helios_permissions
 
@@ -45,10 +72,17 @@ const (
 	// KeyPrefix is the cache key prefix. Must match Helios's writer.
 	KeyPrefix = "helios:perms:"
 
-	// DefaultCacheTTLSeconds is the default TTL. Helios's writer uses
-	// the same value (60s) — the TTL is the safety net when
-	// invalidation fails.
-	DefaultCacheTTLSeconds = 60
+	// DefaultCacheTTLSeconds is the default TTL: 0 = no expiry
+	// (PERSIST semantics in go-redis). Entries are refreshed only
+	// by explicit WriteThrough / Invalidate calls. Override per-instance
+	// via the TTLSeconds option.
+	//
+	// Historical note: v0.1.0 shipped with a 60s default TTL as a
+	// "safety net" for missed invalidations. It was removed when the
+	// team moved to a write-through model — the explicit invalidates
+	// on every mutation make the TTL redundant, and a 90-98%
+	// cache-hit-rate platform needs the entries to stick around.
+	DefaultCacheTTLSeconds = 0
 
 	// scanBatchSize balances round-trip count vs cursor overhead.
 	scanBatchSize = 100
@@ -117,13 +151,18 @@ type RedisCacheOptions struct {
 
 // NewRedisPermissionCache wires the cache. The caller owns the
 // *redis.Client and is responsible for Close().
+//
+// TTLSeconds defaults to DefaultCacheTTLSeconds (0 = no expiry).
+// Any value < 0 is treated as 0 (negative TTLs are nonsensical;
+// we coerce rather than panic to keep callers from a fragile
+// constructor).
 func NewRedisPermissionCache(opts RedisCacheOptions) *RedisPermissionCache {
 	if opts.Client == nil {
 		panic("helios_permissions: RedisCacheOptions.Client is required")
 	}
 	ttl := opts.TTLSeconds
-	if ttl <= 0 {
-		ttl = DefaultCacheTTLSeconds
+	if ttl < 0 {
+		ttl = 0
 	}
 	prefix := opts.KeyPrefix
 	if prefix == "" {
@@ -204,12 +243,12 @@ func (c *RedisPermissionCache) WriteThrough(userID, tenantID string, perms []Per
 }
 
 // Invalidate drops the (userId, tenantId) entry. Logs and returns the
-// error on Redis failure — stale data has no automatic recovery
-// except TTL expiry.
+// error on Redis failure — without a TTL safety net, a missed DEL is
+// sticky until the next WriteThrough for this user.
 func (c *RedisPermissionCache) Invalidate(userID, tenantID string) error {
 	deleted, err := c.rdb.Del(context.Background(), c.key(userID, tenantID)).Result()
 	if err != nil {
-		c.logger.Error("RedisPermissionCache.Invalidate failed — cache may be stale for up to TTL seconds",
+		c.logger.Error("RedisPermissionCache.Invalidate failed — cache will stay stale until the next WriteThrough for this user",
 			"err", err, "userId", userID, "tenantId", tenantID)
 		return err
 	}
@@ -249,3 +288,6 @@ func (c *RedisPermissionCache) InvalidateTenant(tenantID string) error {
 		"tenantId", tenantID, "deleted", totalDeleted)
 	return nil
 }
+
+// TTLSeconds returns the configured TTL (0 = no expiry). Useful for
+// logging and cross-language parity tests.

@@ -53,8 +53,10 @@ type CreateOptions struct {
 	// If nil and RedisURL is set, the factory builds its own client
 	// and owns the lifecycle (Close closes it).
 	Redis *redis.Client
-	// CacheTTLSeconds defaults to 60. The TTL is the safety net when
-	// invalidation fails — it bounds cache staleness.
+	// CacheTTLSeconds defaults to 0 (no expiry). Entries are
+	// refreshed only by explicit WriteThrough / Invalidate calls —
+	// the cache is the primary read path and we target a 90-98% hit
+	// rate. Pass a positive int to opt back into a TTL.
 	CacheTTLSeconds int
 	// Logger defaults to SilentLogger. Inject a structured logger in
 	// production for the warn/error paths.

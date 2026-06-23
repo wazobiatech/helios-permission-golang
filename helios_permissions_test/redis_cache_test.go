@@ -173,12 +173,73 @@ func TestRedisCache_Get_CorruptValueTreatedAsMiss(t *testing.T) {
 	}
 }
 
-// TestRedisCache_Defaults confirms TTL=60 and KeyPrefix constants.
+// TestRedisCache_Defaults confirms the v0.2.0 no-TTL default and the
+// cross-language key prefix.
 func TestRedisCache_Defaults(t *testing.T) {
-	if hp.DefaultCacheTTLSeconds != 60 {
-		t.Fatalf("DefaultCacheTTLSeconds = %d, want 60", hp.DefaultCacheTTLSeconds)
+	if hp.DefaultCacheTTLSeconds != 0 {
+		t.Fatalf("DefaultCacheTTLSeconds = %d, want 0 (no expiry)", hp.DefaultCacheTTLSeconds)
 	}
 	if hp.KeyPrefix != "helios:perms:" {
 		t.Fatalf("KeyPrefix = %q, want helios:perms:", hp.KeyPrefix)
+	}
+}
+
+// TestRedisCache_NoTTL_DefaultConstructor: building a cache without
+// setting TTLSeconds defaults to 0 (no expiry). Entries persist until
+// explicit DEL.
+func TestRedisCache_NoTTL_DefaultConstructor(t *testing.T) {
+	mr, rdb := newMiniredisClient(t)
+	c := hp.NewRedisPermissionCache(hp.RedisCacheOptions{
+		Client: rdb,
+		Logger: hp.SilentLogger(),
+	})
+	if err := c.WriteThrough("u", "t", []hp.Permission{hp.PermissionAthensProjectView}); err != nil {
+		t.Fatal(err)
+	}
+	// Fast-forwarding past any 60s safety net must NOT expire the key —
+	// there is no TTL.
+	mr.FastForward(120 * time.Second)
+	got, err := c.Get("u", "t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != hp.PermissionAthensProjectView {
+		t.Fatalf("expected entry to persist past FastForward, got %v", got)
+	}
+}
+
+// TestRedisCache_NoTTL_Set_NotSet: Set with the default (no-TTL)
+// constructor writes a persistent key — miniredis's TTL is -1.
+func TestRedisCache_NoTTL_Set_NotSet(t *testing.T) {
+	mr, rdb := newMiniredisClient(t)
+	c := hp.NewRedisPermissionCache(hp.RedisCacheOptions{
+		Client: rdb,
+		Logger: hp.SilentLogger(),
+	})
+	if err := c.Set("u", "t", []hp.Permission{hp.PermissionAthensProjectView}); err != nil {
+		t.Fatal(err)
+	}
+	ttl := mr.TTL("helios:perms:u:t")
+	if ttl != 0 {
+		// miniredis returns 0 for "no expiry set", matching Redis's PERSIST semantics.
+		t.Fatalf("expected miniredis TTL=0 (no expiry), got %v", ttl)
+	}
+}
+
+// TestRedisCache_NoTTL_OptInRestoresExpiry: passing a positive
+// TTLSeconds restores the EX arg on writes.
+func TestRedisCache_NoTTL_OptInRestoresExpiry(t *testing.T) {
+	mr, rdb := newMiniredisClient(t)
+	c := hp.NewRedisPermissionCache(hp.RedisCacheOptions{
+		Client:     rdb,
+		TTLSeconds: 120,
+		Logger:     hp.SilentLogger(),
+	})
+	if err := c.WriteThrough("u", "t", []hp.Permission{hp.PermissionAthensProjectView}); err != nil {
+		t.Fatal(err)
+	}
+	ttl := mr.TTL("helios:perms:u:t")
+	if ttl <= 0 || ttl > 120*time.Second {
+		t.Fatalf("expected positive TTL <= 120s, got %v", ttl)
 	}
 }

@@ -13,6 +13,17 @@
 // Write path (called by Helios, not by the SDK client itself): the
 // cache exposes WriteThrough / Invalidate / InvalidateTenant. Helios
 // calls these after every role change. See CLAUDE.md / plan ZIN-4901i.
+//
+// Cache TTL:
+//
+//   The default cache has NO TTL — entries live until explicit DEL
+//   via Invalidate / InvalidateTenant (or via Helios's sync
+//   write-through on every role-changing mutation). The cache is the
+//   primary read path for CallerHasPermission and we target a 90-98%
+//   hit rate; entries must outlive the request burst. Pass
+//   CacheTTLSeconds=<positive int> to Create to opt back into a TTL
+//   (useful for staging with high churn). Both Helios-side and SDK-side
+//   caches must use the same TTL policy.
 
 package helios_permissions
 
