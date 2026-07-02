@@ -205,6 +205,13 @@ func (c *permissionClient) fetchAndPopulate(ctx context.Context, userID, tenantI
 }
 
 func (c *permissionClient) CallerHasPermission(ctx context.Context, userID, tenantID string, perm Permission) (bool, error) {
+	// Universal perms (self-scope or granted to every role) short-circuit
+	// to true without consulting cache or Helios. Critical for root-tenant
+	// users (Mercury's platform admins) who have no Helios membership row.
+	// See IsUniversalPerm.
+	if IsUniversalPerm(perm) {
+		return true, nil
+	}
 	perms, err := c.fetchAndCache(ctx, userID, tenantID)
 	if err != nil {
 		return false, err
@@ -218,28 +225,68 @@ func (c *permissionClient) CallerHasPermission(ctx context.Context, userID, tena
 }
 
 func (c *permissionClient) GetUserPermissions(ctx context.Context, userID, tenantID string) ([]Permission, error) {
-	return c.fetchAndCache(ctx, userID, tenantID)
-}
-
-func (c *permissionClient) Explain(ctx context.Context, userID, tenantID string, perm Permission) (*Explanation, error) {
 	perms, err := c.fetchAndCache(ctx, userID, tenantID)
 	if err != nil {
 		return nil, err
 	}
+	// Self-scope perms are universal by contract — fold them in so the
+	// caller sees a complete view regardless of tenant membership.
+	return foldSelfPermissions(perms), nil
+}
+
+func (c *permissionClient) Explain(ctx context.Context, userID, tenantID string, perm Permission) (*Explanation, error) {
+	// Universal perms are granted by contract — no Helios lookup needed.
+	if IsUniversalPerm(perm) {
+		fullPerms := foldSelfPermissions([]Permission{})
+		return &Explanation{
+			Allowed:     true,
+			Reason:      "granted_by_role",
+			Permissions: fullPerms,
+		}, nil
+	}
+	perms, err := c.fetchAndCache(ctx, userID, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	fullPerms := foldSelfPermissions(perms)
 	for _, p := range perms {
 		if p == perm {
 			return &Explanation{
 				Allowed:     true,
 				Reason:      "granted_by_role",
-				Permissions: perms,
+				Permissions: fullPerms,
 			}, nil
 		}
 	}
 	return &Explanation{
 		Allowed:     false,
 		Reason:      "not_in_role_perm_set",
-		Permissions: perms,
+		Permissions: fullPerms,
 	}, nil
+}
+
+// foldSelfPermissions concatenates SELF_PERMISSIONS into the role
+// perm list. Self-scope perms are universal by contract — every
+// authenticated user has them regardless of role or tenant membership.
+// Without this, root-tenant users (Mercury's platform admins, who
+// have no Helios membership row) would see an empty perm array even
+// though they can mutate their own profile.
+func foldSelfPermissions(rolePerms []Permission) []Permission {
+	seen := make(map[Permission]struct{}, len(SELF_PERMISSIONS)+len(rolePerms))
+	merged := make([]Permission, 0, len(SELF_PERMISSIONS)+len(rolePerms))
+	for _, p := range SELF_PERMISSIONS {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			merged = append(merged, p)
+		}
+	}
+	for _, p := range rolePerms {
+		if _, ok := seen[p]; !ok {
+			seen[p] = struct{}{}
+			merged = append(merged, p)
+		}
+	}
+	return merged
 }
 
 func (c *permissionClient) Invalidate(ctx context.Context, userID, tenantID string) error {

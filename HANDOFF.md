@@ -6,10 +6,10 @@ Status snapshot for the Go SDK mirror of `@wazobiatech/helios-permissions`.
 
 Go SDK shipped. Mirrors the TS / Python SDKs' cache-first
 `callerHasPermission` surface. Codegen is wired against
-`wazobiatech/permission-contract@v1.4.0` and the CI pipeline fails
-on drift. Tag `v0.2.0` to publish.
+`wazobiatech/permission-contract@v1.6.0` and the CI pipeline fails
+on drift. Tag `v0.7.0` to publish.
 
-## What's in v0.2.0
+## What's in v0.7.0
 
 - `Client` interface: `CallerHasPermission`, `GetUserPermissions`, `Explain`, `Invalidate`, `InvalidateTenant`, `WriteThrough`.
 - `Create(opts) (*Result, error)` factory that wires `HeliosClient` + `RedisPermissionCache` + `Client`. Owns Redis lifecycle when given a URL; respects injected lifecycle.
@@ -18,23 +18,47 @@ on drift. Tag `v0.2.0` to publish.
 - HMAC signing matches the TS / Python SDKs and Helios's `hmac.ts` verifier: `METHOD + path + timestamp` (path WITHOUT query string).
 - In-flight coalescing for concurrent Helios fetches on the same key.
 - `cmd/codegen/main.go` Go-native emitter (alternative to the Node emitter in `permission-contract`).
+- **v0.7.0 universal-by-contract short-circuit** — `CallerHasPermission` returns `true` without consulting Helios (or the cache) when the perm is universal by contract — i.e. the perm is either self-scope or appears in every role's `ROLE_PERMISSIONS` entry. `GetUserPermissions` and `Explain` fold the self-scope perms into their result so callers see a complete view regardless of tenant membership. Mirrors the TS / Python / PHP Laravel SDK v0.7.0 behavior. Critical for root-tenant users who have no Helios membership row.
 - 6 test files; `go test -race ./...` is green.
 - Codegen fixture in `permission-contract/tests/fixtures/` matches the in-repo `role_permissions.go` byte-for-byte (modulo header).
 
-### Changes from v0.1.0
+### Changes from v0.6.0
 
-- **No-TTL cache default.** v0.1.0 shipped with a 60s default TTL.
-  v0.2.0 removes it. `DefaultCacheTTLSeconds = 0` (matches the TS and
-  Python SDKs at v0.5.0 / v0.4.0). Entries live until explicit DEL.
-  Rationale: the cache is the primary read path for
-  `callerHasPermission` and we target a 90-98% hit rate; entries must
-  outlive the request burst. Every entry is invalidated explicitly at
-  the mutation site. Pass `CacheTTLSeconds=<positive int>` to opt back
-  in.
-- **Permission-contract v1.4.0.** Adds `helios:external:register /
-  revoke / view` (Use case 2 — "tenant brings their own auth") and
-  `athens:team:invite / remove`. Renames `helios:tenant:switch` →
-  `helios:tenant:switch:self` with scope `self` (universal perm).
+- **Universal-by-contract short-circuit (additive behavior change).**
+  `Client.CallerHasPermission` and `Client.Explain` now return `true`
+  without consulting Helios (or the cache) when the requested perm is
+  universal by contract — i.e. the perm is either self-scope (universal
+  by contract invariant) or appears in every role's `ROLE_PERMISSIONS`
+  entry. `GetUserPermissions` folds the self-scope perms into its
+  result so callers see a complete view regardless of tenant membership.
+
+  Why this exists: Helios stores per-(user, tenant) membership rows.
+  Root-tenant users (Mercury's platform admins) and any other
+  tenantless caller have no row to look up. Without this short-circuit,
+  every `CallerHasPermission` for a universal perm would resolve to
+  `not_a_member` and 403 the caller. The contract invariant is that
+  these perms do NOT depend on tenant membership — they are universal.
+  Adding a perm to all four roles is a deliberate, reviewable contract
+  decision; the SDK honors it without re-fetching.
+- **`IsUniversalPerm(Permission)` helper.** Codegen'd from
+  `permission-contract/permissions.json` and exposed on the generated
+  `role_permissions.go`. The Go binary emitter (`cmd/codegen/main.go`)
+  is kept in lockstep with the contract repo's Node emitter
+  (`permission-contract/scripts/codegen-go.mjs`).
+- **`foldSelfPermissions` helper.** Concatenates `SELF_PERMISSIONS`
+  into the result of `GetUserPermissions` and `Explain`. Deduplicated
+  via a `map[Permission]struct{}` set.
+- **Permission-contract v1.6.0.** Adds Mercury expansion (24 new perms
+  in v1.5.0; v1.6.0 carries the same vocabulary plus scope-grouped
+  emitter ordering for stable diffs).
+- **Test fixtures regenerated.** `permission-contract/tests/fixtures/role_permissions.go.expected`
+  updated against v1.6.0 contract. 5 new short-circuit tests added in
+  `permission_client_test.go`: self-scope short-circuit, universal-by-role
+  short-circuit, non-universal consults Helios, Explain of universal perm,
+  GetUserPermissions folds self-scope perms. 5 pre-existing tests rewritten
+  to use `PermissionAthensProjectDelete` (OWNER-only) instead of
+  `PermissionAthensProjectView` so the short-circuit does not bypass
+  them.
 
 ## Why this lives in its own repo
 
@@ -107,7 +131,7 @@ allowed, err := r.Client.CallerHasPermission(ctx, "user-123", "tenant-abc", hp.P
 ## Known issues
 
 - **`resolvePermissions` returns the underlying slice without copying.** This is a known minor issue (callers shouldn't mutate, but a defensive copy is cheap). Tracked separately; not blocking v0.1.0.
-- **No event-driven invalidator.** Per the plan, v1 of the Go / Laravel SDKs relies on the 60s TTL + Helios's `writeThrough`. A follow-up ticket can add a Kafka consumer if a Go service needs real-time event-driven invalidation.
+- **No event-driven invalidator.** Per the plan, v1 of the Go / Laravel SDKs relies on the no-TTL cache + Helios's `writeThrough`. A follow-up ticket can add a Kafka consumer if a Go service needs real-time event-driven invalidation.
 
 ## Future work
 

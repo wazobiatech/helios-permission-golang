@@ -66,14 +66,22 @@ func testClient(h *hp.HeliosClient, staleOnError *bool) (hp.Client, *hp.InMemory
 
 // TestCallerHasPermission_CacheHit verifies a second call within
 // the cache lifetime does NOT re-hit Helios.
+//
+// Note: we use PermissionAthensProjectDelete (OWNER-only) instead of
+// PermissionAthensProjectView because the latter is universal-by-contract
+// (granted to every role) and short-circuits in v0.7.0 without ever
+// consulting the cache. The cache-hit semantics this test is exercising
+// require a non-universal perm.
 func TestCallerHasPermission_CacheHit(t *testing.T) {
-	f := newHeliosFixture(t, nil)
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"active","role":"OWNER","permissions":["athens:project:delete"]}`)
+	})
 	defer f.close()
 
 	c, _ := testClient(f.client(), nil)
 	ctx := context.Background()
 
-	allowed, err := c.CallerHasPermission(ctx, "u", "t", hp.PermissionAthensProjectView)
+	allowed, err := c.CallerHasPermission(ctx, "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +91,7 @@ func TestCallerHasPermission_CacheHit(t *testing.T) {
 	if atomic.LoadInt32(&f.hits) != 1 {
 		t.Fatalf("first call should hit Helios once, got %d", f.hits)
 	}
-	allowed2, err := c.CallerHasPermission(ctx, "u", "t", hp.PermissionAthensProjectView)
+	allowed2, err := c.CallerHasPermission(ctx, "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,23 +105,31 @@ func TestCallerHasPermission_CacheHit(t *testing.T) {
 
 // TestCallerHasPermission_CacheMiss_HeliosOK: write-through the
 // perm array to the cache after a successful fetch.
+//
+// Uses PermissionAthensProjectDelete (OWNER-only) to bypass the
+// universal short-circuit.
 func TestCallerHasPermission_CacheMiss_HeliosOK(t *testing.T) {
-	f := newHeliosFixture(t, nil)
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"active","role":"OWNER","permissions":["athens:project:delete"]}`)
+	})
 	defer f.close()
 	c, cache := testClient(f.client(), nil)
 
-	allowed, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectView)
+	allowed, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil || !allowed {
 		t.Fatalf("expected allowed, got allowed=%v err=%v", allowed, err)
 	}
 	cached, _ := cache.Get("u", "t")
-	if len(cached) != 1 || cached[0] != hp.PermissionAthensProjectView {
+	if len(cached) != 1 || cached[0] != hp.PermissionAthensProjectDelete {
 		t.Fatalf("cache should contain the fetched perms, got %v", cached)
 	}
 }
 
 // TestCallerHasPermission_NotMember_CachesEmpty: 404 → empty perms
 // cached and returned.
+//
+// Uses PermissionAthensProjectDelete (OWNER-only) to bypass the
+// universal short-circuit.
 func TestCallerHasPermission_NotMember_CachesEmpty(t *testing.T) {
 	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
@@ -122,7 +138,7 @@ func TestCallerHasPermission_NotMember_CachesEmpty(t *testing.T) {
 	defer f.close()
 	c, cache := testClient(f.client(), nil)
 
-	allowed, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectView)
+	allowed, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,12 +156,17 @@ func TestCallerHasPermission_NotMember_CachesEmpty(t *testing.T) {
 
 // TestCallerHasPermission_StaleOnError_True: on Helios error, return
 // the cached value (fail-closed allow-stale).
+//
+// Uses PermissionAthensProjectDelete (OWNER-only) to bypass the
+// universal short-circuit.
 func TestCallerHasPermission_StaleOnError_True(t *testing.T) {
 	// First call populates the cache.
-	ok := newHeliosFixture(t, nil)
+	ok := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"active","role":"OWNER","permissions":["athens:project:delete"]}`)
+	})
 	defer ok.close()
 	c, _ := testClient(ok.client(), nil)
-	_, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectView)
+	_, err := c.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,14 +181,14 @@ func TestCallerHasPermission_StaleOnError_True(t *testing.T) {
 	// Rewire the client's helios by re-creating against the bad fixture.
 	// Same cache (manually share by building a new client on top).
 	cache := hp.NewInMemoryPermissionCache()
-	_ = cache.Set("u", "t", []hp.Permission{hp.PermissionAthensProjectView})
+	_ = cache.Set("u", "t", []hp.Permission{hp.PermissionAthensProjectDelete})
 	cli, _ := hp.NewClient(hp.ClientOptions{
 		Cache:        cache,
 		Helios:       bad.client(),
 		StaleOnError: ptrBool(true),
 		Logger:       hp.SilentLogger(),
 	})
-	allowed, err := cli.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectView)
+	allowed, err := cli.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectDelete)
 	if err != nil {
 		t.Fatalf("with staleOnError=true, error should be swallowed: %v", err)
 	}
@@ -178,6 +199,9 @@ func TestCallerHasPermission_StaleOnError_True(t *testing.T) {
 
 // TestCallerHasPermission_StaleOnError_False: on Helios error,
 // propagate the error when no fresh value is available.
+//
+// Uses PermissionAthensProjectDelete (OWNER-only) to bypass the
+// universal short-circuit.
 func TestCallerHasPermission_StaleOnError_False(t *testing.T) {
 	bad := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -191,7 +215,7 @@ func TestCallerHasPermission_StaleOnError_False(t *testing.T) {
 		StaleOnError: ptrBool(false),
 		Logger:       hp.SilentLogger(),
 	})
-	_, err := cli.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectView)
+	_, err := cli.CallerHasPermission(context.Background(), "u", "t", hp.PermissionAthensProjectDelete)
 	if err == nil {
 		t.Fatal("expected error to propagate when staleOnError=false and no cache")
 	}
@@ -201,12 +225,16 @@ func TestCallerHasPermission_StaleOnError_False(t *testing.T) {
 }
 
 // TestGetUserPermissions returns the full perm array.
+//
+// v0.7.0 folds SELF_PERMISSIONS into the result, so we now see the 3
+// role perms + every self-scope perm. Just verify the expected
+// presence/absence.
 func TestGetUserPermissions(t *testing.T) {
 	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{
 			"status": "active",
 			"role": "OWNER",
-			"permissions": ["athens:project:view", "athens:project:update", "helios:tenant:switch"]
+			"permissions": ["athens:project:view", "athens:project:update", "helios:tenant:switch:self"]
 		}`)
 	})
 	defer f.close()
@@ -215,8 +243,25 @@ func TestGetUserPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 3 perms, got %d: %v", len(got), got)
+	wantPresent := []hp.Permission{
+		hp.PermissionAthensProjectView,
+		hp.PermissionAthensProjectUpdate,
+		hp.PermissionHeliosTenantSwitchSelf,
+		hp.PermissionMercuryUserReadSelf,   // self-scope (folded in)
+		hp.PermissionMercuryUserWriteSelf,  // self-scope (folded in)
+		hp.PermissionMercuryUserDeleteSelf, // self-scope (folded in)
+	}
+	for _, want := range wantPresent {
+		found := false
+		for _, p := range got {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s in perms, got: %v", want, got)
+		}
 	}
 }
 
@@ -345,3 +390,155 @@ func TestNewClient_RequiresHelios(t *testing.T) {
 }
 
 func ptrBool(b bool) *bool { return &b }
+
+// --- v0.7.0 short-circuit tests ----------------------------------------
+//
+// v0.7.0 adds a universal-by-contract short-circuit to CallerHasPermission
+// and Explain: perms that are either self-scope OR present in every role's
+// ROLE_PERMISSIONS entry return true without consulting Helios or the
+// cache. Critical for root-tenant users who have no Helios membership row.
+
+// TestCallerHasPermission_SelfScope_ShortCircuits: a self-scope perm must
+// return true even when Helios returns not_a_member, and must NOT populate
+// the cache (the lookup never happens).
+func TestCallerHasPermission_SelfScope_ShortCircuits(t *testing.T) {
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"not_a_member"}`)
+	})
+	defer f.close()
+	c, cache := testClient(f.client(), nil)
+
+	allowed, err := c.CallerHasPermission(
+		context.Background(),
+		"root-platform-admin",
+		"root-tenant-uuid",
+		hp.PermissionMercuryUserWriteSelf,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected self-scope perm to short-circuit to true")
+	}
+	if atomic.LoadInt32(&f.hits) != 0 {
+		t.Fatalf("short-circuit must not hit Helios, got %d hits", f.hits)
+	}
+	if cached, _ := cache.Get("root-platform-admin", "root-tenant-uuid"); cached != nil {
+		t.Fatalf("short-circuit must not populate cache, got %v", cached)
+	}
+}
+
+// TestCallerHasPermission_UniversalByRole_ShortCircuits: mercury:api_keys:read
+// is granted to all 4 roles (OWNER+ADMIN+EDITOR+VIEWER), so the SDK
+// short-circuits without consulting Helios.
+func TestCallerHasPermission_UniversalByRole_ShortCircuits(t *testing.T) {
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"not_a_member"}`)
+	})
+	defer f.close()
+	c, _ := testClient(f.client(), nil)
+
+	allowed, err := c.CallerHasPermission(
+		context.Background(),
+		"root-admin",
+		"root-tenant",
+		hp.PermissionMercuryApi_keysRead,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !allowed {
+		t.Fatal("expected universal-by-role perm to short-circuit to true")
+	}
+	if atomic.LoadInt32(&f.hits) != 0 {
+		t.Fatalf("short-circuit must not hit Helios, got %d hits", f.hits)
+	}
+}
+
+// TestCallerHasPermission_NonUniversal_ConsultsHelios: mercury:api_keys:create
+// is OWNER+ADMIN only. A VIEWER's role does NOT grant it, so the SDK must
+// consult Helios and deny.
+func TestCallerHasPermission_NonUniversal_ConsultsHelios(t *testing.T) {
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"active","role":"VIEWER","permissions":["mercury:api_keys:read"]}`)
+	})
+	defer f.close()
+	c, _ := testClient(f.client(), nil)
+
+	allowed, err := c.CallerHasPermission(
+		context.Background(),
+		"viewer",
+		"t1",
+		hp.PermissionMercuryApi_keysCreate,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if allowed {
+		t.Fatal("VIEWER should not have api_keys:create")
+	}
+	if atomic.LoadInt32(&f.hits) != 1 {
+		t.Fatalf("non-universal perm must consult Helios, got %d hits", f.hits)
+	}
+}
+
+// TestExplain_UniversalPerm_DoesNotConsultHelios.
+func TestExplain_UniversalPerm_DoesNotConsultHelios(t *testing.T) {
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"not_a_member"}`)
+	})
+	defer f.close()
+	c, _ := testClient(f.client(), nil)
+
+	exp, err := c.Explain(
+		context.Background(),
+		"root-admin",
+		"root-tenant",
+		hp.PermissionMercuryUserWriteSelf,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !exp.Allowed || exp.Reason != "granted_by_role" {
+		t.Fatalf("unexpected explanation: %+v", exp)
+	}
+	if atomic.LoadInt32(&f.hits) != 0 {
+		t.Fatalf("Explain of universal perm must not hit Helios, got %d hits", f.hits)
+	}
+}
+
+// TestGetUserPermissions_FoldsSelfScope_ForRootTenantNotMember: a root-tenant
+// user (Helios returns not_a_member) must still see the self-scope perms in
+// the returned list — that's the whole point of foldSelfPermissions.
+func TestGetUserPermissions_FoldsSelfScope_ForRootTenantNotMember(t *testing.T) {
+	f := newHeliosFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = io.WriteString(w, `{"status":"not_a_member"}`)
+	})
+	defer f.close()
+	c, _ := testClient(f.client(), nil)
+
+	got, err := c.GetUserPermissions(context.Background(), "root-admin", "root-tenant")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []hp.Permission{
+		hp.PermissionMercuryUserReadSelf,
+		hp.PermissionMercuryUserWriteSelf,
+		hp.PermissionMercuryUserDeleteSelf,
+	} {
+		found := false
+		for _, p := range got {
+			if p == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("expected %s in folded perms, got: %v", want, got)
+		}
+	}
+}
