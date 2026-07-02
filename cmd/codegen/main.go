@@ -303,6 +303,35 @@ func emit(c contract) (string, error) {
 	fmt.Fprintf(&b, "}\n")
 	fmt.Fprintf(&b, "\n")
 
+	// IsUniversalPerm — mirrors the TS / Python / PHP short-circuit.
+	fmt.Fprintf(&b, "// IsUniversalPerm reports whether perm is universal-by-contract — granted to\n")
+	fmt.Fprintf(&b, "// every authenticated caller without consulting Helios. Holds when either the\n")
+	fmt.Fprintf(&b, "// perm is self-scope, or it appears in every role's ROLE_PERMISSIONS entry\n")
+	fmt.Fprintf(&b, "// (OWNER + ADMIN + EDITOR + VIEWER).\n")
+	fmt.Fprintf(&b, "//\n")
+	fmt.Fprintf(&b, "// Why this exists: Helios stores per-(user, tenant) membership rows. Root-tenant\n")
+	fmt.Fprintf(&b, "// users (Mercury's platform admins) and any other tenantless caller have no row\n")
+	fmt.Fprintf(&b, "// to look up. Without this short-circuit, every CallerHasPermission for a\n")
+	fmt.Fprintf(&b, "// universal perm would resolve to not_a_member and 403 the caller. The contract\n")
+	fmt.Fprintf(&b, "// invariant is that these perms do NOT depend on tenant membership — they are\n")
+	fmt.Fprintf(&b, "// universal.\n")
+	fmt.Fprintf(&b, "//\n")
+	fmt.Fprintf(&b, "// The check trusts the contract: if a perm is in every role's perm array, the\n")
+	fmt.Fprintf(&b, "// contract author intends every authenticated user to have it. Adding a perm to\n")
+	fmt.Fprintf(&b, "// all four roles is a deliberate, reviewable contract decision — the SDK honors\n")
+	fmt.Fprintf(&b, "// it without re-fetching.\n")
+	fmt.Fprintf(&b, "func IsUniversalPerm(perm Permission) bool {\n")
+	fmt.Fprintf(&b, "\tif IsSelfScope(perm) {\n")
+	fmt.Fprintf(&b, "\t\treturn true\n")
+	fmt.Fprintf(&b, "\t}\n")
+	fmt.Fprintf(&b, "\tfor _, role := range Roles {\n")
+	fmt.Fprintf(&b, "\t\tif !RoleHasPermission(role, perm) {\n")
+	fmt.Fprintf(&b, "\t\t\treturn false\n")
+	fmt.Fprintf(&b, "\t\t}\n")
+	fmt.Fprintf(&b, "\t}\n")
+	fmt.Fprintf(&b, "\treturn true\n")
+	fmt.Fprintf(&b, "}\n")
+
 	return b.String(), nil
 }
 
